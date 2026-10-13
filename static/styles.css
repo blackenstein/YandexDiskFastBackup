@@ -1,0 +1,656 @@
+/* Стиль в духе Яндекс Диска: белый фон, жёлтые акценты, тёмный текст. */
+
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  --yellow: #ffcc00;
+  --yellow-dark: #e6b400;
+  --blue: #3385ff;
+  --text: #21201f;
+  --text-2: #74716e;
+  --bg: #ffffff;
+  --bg-soft: #f7f7f7;
+  --border: #e6e6e6;
+  --ok: #2a9d5c;
+  --error: #e5484d;
+  --radius: 10px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "YS Text", -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  font-size: 14px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* --- кнопки ------------------------------------------------------------- */
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 16px;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--yellow);
+  color: var(--text);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--yellow-dark);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-soft);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--blue);
+  padding: 0;
+  font-size: 13px;
+}
+
+/* --- общие блоки ---------------------------------------------------------- */
+
+.muted {
+  color: var(--text-2);
+}
+
+.hint {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 10px 0;
+}
+
+.hint.small {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.alert {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  margin: 10px 0;
+}
+
+.alert.error {
+  background: #fdecec;
+  color: #b3261e;
+}
+
+.alert.ok {
+  background: #e9f7ef;
+  color: #1d7a45;
+}
+
+.loading {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-2);
+}
+
+/* --- экран подключения ---------------------------------------------------- */
+
+.token-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-soft);
+}
+
+.token-card {
+  background: var(--bg);
+  width: 500px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+}
+
+.token-logo {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.token-logo h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.token-card > p {
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
+.token-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  margin: 14px 0;
+  resize: vertical;
+}
+
+.token-input:focus {
+  outline: 2px solid var(--yellow);
+  border-color: transparent;
+}
+
+/* --- каркас приложения ------------------------------------------------------ */
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  flex: none;
+}
+
+.topbar .logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.topbar .sep {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
+
+.topbar .subtitle {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.topbar .account {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* --- браузер диска ---------------------------------------------------------- */
+
+.browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 20px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.crumb {
+  background: none;
+  border: none;
+  color: var(--blue);
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.crumb:hover {
+  background: var(--bg-soft);
+}
+
+.crumb-sep {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.crumb-sep-mark {
+  color: var(--text-2);
+}
+
+.browse-alert {
+  margin: 12px 20px 0;
+}
+
+.table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.file-table th {
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+
+.file-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.file-table tbody tr:hover {
+  background: var(--bg-soft);
+}
+
+.file-table tr.selected {
+  background: #fff8e1;
+}
+
+.file-table input[type="checkbox"] {
+  accent-color: var(--blue);
+  width: 16px;
+  height: 16px;
+}
+
+.col-check {
+  width: 44px;
+}
+
+.col-size {
+  width: 110px;
+}
+
+.col-date {
+  width: 170px;
+}
+
+.file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-name.clickable {
+  cursor: pointer;
+}
+
+.file-name.clickable:hover {
+  color: var(--blue);
+}
+
+.empty {
+  text-align: center;
+  color: var(--text-2);
+  padding: 30px;
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-weight: 600;
+  flex: none;
+}
+
+/* --- панель задач ------------------------------------------------------------- */
+
+.task-panel {
+  width: 380px;
+  flex: none;
+  border-left: 1px solid var(--border);
+  padding: 20px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.task-panel h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+}
+
+.field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-2);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.text-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.text-input:focus {
+  outline: 2px solid var(--yellow);
+  border-color: transparent;
+}
+
+.task-panel .btn-block {
+  margin: 14px 0;
+}
+
+.tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.task-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.task-card.task-error {
+  border-color: #f5c6c8;
+}
+
+.task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.task-title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.st-pending {
+  background: var(--bg-soft);
+  color: var(--text-2);
+}
+
+.st-running {
+  background: #fff8e1;
+  color: #8a6d00;
+}
+
+.st-done {
+  background: #e9f7ef;
+  color: var(--ok);
+}
+
+.st-error {
+  background: #fdecec;
+  color: var(--error);
+}
+
+.st-cancelled {
+  background: var(--bg-soft);
+  color: var(--text-2);
+}
+
+.progress {
+  height: 6px;
+  border-radius: 4px;
+  background: #f0f0f0;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--yellow);
+  border-radius: 4px;
+  transition: width 0.4s;
+}
+
+.task-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  flex-wrap: wrap;
+}
+
+.task-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--error);
+  white-space: pre-wrap;
+}
+
+.task-errors {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-2);
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.task-errors code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.task-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* --- Тёмная тема --- */
+[data-theme="dark"] {
+  --yellow: #ffcc00;
+  --yellow-dark: #e6b400;
+  --blue: #4da3ff;
+  --text: #e6e6e6;
+  --text-2: #a0a0a0;
+  --bg: #181818;
+  --bg-soft: #242424;
+  --border: #333333;
+  --ok: #34c759;
+  --error: #ff453a;
+}
+
+[data-theme="dark"] body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+[data-theme="dark"] .token-card {
+  background: var(--bg);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="dark"] .text-input,
+[data-theme="dark"] .token-input {
+  background: var(--bg-soft);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .file-table th {
+  background: var(--bg);
+  border-bottom-color: var(--border);
+}
+
+[data-theme="dark"] .file-table td {
+  border-bottom-color: #262626;
+}
+
+[data-theme="dark"] .file-table tbody tr:hover {
+  background: var(--bg-soft);
+}
+
+[data-theme="dark"] .file-table tr.selected {
+  background: #332d16;
+}
+
+[data-theme="dark"] .progress {
+  background: #2a2a2a;
+}
+
+[data-theme="dark"] .alert.error {
+  background: #381a1b;
+  color: #ff8585;
+}
+
+[data-theme="dark"] .alert.ok {
+  background: #163321;
+  color: #79e0a0;
+}
+
+[data-theme="dark"] .st-running {
+  background: #383013;
+  color: #ffd644;
+}
+
+[data-theme="dark"] .st-done {
+  background: #163321;
+  color: #79e0a0;
+}
+
+[data-theme="dark"] .st-error {
+  background: #381a1b;
+  color: #ff8585;
+}
+
+[data-theme="dark"] .st-pending,
+[data-theme="dark"] .st-cancelled {
+  background: #2a2a2a;
+  color: #a0a0a0;
+}
+
+[data-theme="dark"] .task-card.task-error {
+  border-color: #592426;
+}
+
+/* --- Группа инпута с кнопкой обзора --- */
+.input-group {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.input-group .text-input {
+  flex: 1;
+}
+
+.input-group .btn {
+  white-space: nowrap;
+}
+
+.theme-toggle-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--bg-soft);
+}
