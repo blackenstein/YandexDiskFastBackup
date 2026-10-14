@@ -47,3 +47,5 @@ def test_yandex_rel():
 def test_yandex_rel_empty():
     with pytest.raises(PathError):
         yandex_rel("/")
+
+

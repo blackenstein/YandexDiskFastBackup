@@ -50,6 +50,7 @@ class Database:
                     done_bytes INTEGER DEFAULT 0,
                     failed_files INTEGER DEFAULT 0,
                     error TEXT DEFAULT '',
+                    keep_parts BOOLEAN DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -66,6 +67,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
                 """
             )
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN keep_parts BOOLEAN DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
     # --- Account ---
 
@@ -106,7 +111,7 @@ class Database:
 
     # --- Tasks ---
 
-    def create_task(self, task_id: str, dest: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def create_task(self, task_id: str, dest: str, items: List[Dict[str, Any]], keep_parts: bool = False) -> Dict[str, Any]:
         now = _utc_now_iso()
         items_json = json.dumps(items, ensure_ascii=False)
         with self._get_conn() as conn:
@@ -115,10 +120,10 @@ class Database:
                 INSERT INTO tasks (
                     id, dest, items, status,
                     total_files, total_bytes, done_files, done_bytes, failed_files,
-                    error, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', 0, 0, 0, 0, 0, '', ?, ?)
+                    error, keep_parts, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', 0, 0, 0, 0, 0, '', ?, ?, ?)
                 """,
-                (task_id, dest, items_json, now, now),
+                (task_id, dest, items_json, 1 if keep_parts else 0, now, now),
             )
         return {
             "id": task_id,
@@ -131,6 +136,7 @@ class Database:
             "done_bytes": 0,
             "failed_files": 0,
             "error": "",
+            "keep_parts": bool(keep_parts),
             "created_at": now,
             "updated_at": now,
         }
@@ -236,6 +242,7 @@ class Database:
             data = dict(row)
             data["items"] = json.loads(data["items"]) if data.get("items") else []
             data["errors"] = self.get_task_errors(task_id)
+            data["keep_parts"] = bool(data.get("keep_parts", 0))
             return data
 
     def list_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
@@ -253,6 +260,7 @@ class Database:
                 data = dict(r)
                 data["items"] = json.loads(data["items"]) if data.get("items") else []
                 data["errors"] = self.get_task_errors(data["id"])
+                data["keep_parts"] = bool(data.get("keep_parts", 0))
                 result.append(data)
             return result
 

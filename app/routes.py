@@ -31,6 +31,7 @@ class CreateTaskRequest(BaseModel):
     dest: str
     items: List[Dict[str, Any]]
     concurrency: Optional[int] = None
+    keep_parts: Optional[bool] = False
 
 
 # --- Эндпоинты ---
@@ -192,8 +193,14 @@ async def create_task(req: CreateTaskRequest):
         )
 
     task_id = str(uuid.uuid4())
-    db.create_task(task_id, str(dest_path), clean)
-    download_manager.start_task(task_id, str(dest_path), clean, concurrency=req.concurrency)
+    db.create_task(task_id, str(dest_path), clean, keep_parts=bool(req.keep_parts))
+    download_manager.start_task(
+        task_id,
+        str(dest_path),
+        clean,
+        concurrency=req.concurrency,
+        keep_parts=bool(req.keep_parts),
+    )
     return {"id": task_id}
 
 

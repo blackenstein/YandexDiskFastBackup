@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,18 +17,30 @@ from .yandex import CancelledDownload, TokenInvalidError, YandexAPIError, Yandex
 logger = logging.getLogger(__name__)
 
 
+def _format_bytes(num: int) -> str:
+    n = float(num)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if abs(n) < 1024.0:
+            return f"{n:3.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} ПБ"
+
+
 class TaskRunner:
+
     def __init__(
         self,
         task_id: str,
         dest: str,
         items: List[Dict[str, Any]],
         concurrency: int = DOWNLOAD_CONCURRENCY,
+        keep_parts: bool = False,
     ):
         self.task_id = task_id
         self.dest = dest
         self.items = items
         self.concurrency = max(1, min(64, int(concurrency)))
+        self.keep_parts = bool(keep_parts)
         self.semaphore = asyncio.Semaphore(self.concurrency)
         self.cancel_event = asyncio.Event()
         self.total_files = 0
@@ -39,6 +52,10 @@ class TaskRunner:
         self.error = ""
         self.errors: List[Dict[str, str]] = []
         self._main_task: Optional[asyncio.Task] = None
+        self.speed: float = 0.0
+        self._last_speed_bytes: int = 0
+        self._last_speed_time: float = time.monotonic()
+        self._report_header_written: bool = False
 
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()
@@ -47,6 +64,17 @@ class TaskRunner:
         self.cancel_event.set()
         if self._main_task and not self._main_task.done():
             self._main_task.cancel()
+
+    def get_speed(self) -> float:
+        now = time.monotonic()
+        dt = now - self._last_speed_time
+        if dt >= 0.8:
+            delta = self.done_bytes - self._last_speed_bytes
+            self.speed = max(0.0, delta / dt)
+            self._last_speed_bytes = self.done_bytes
+            self._last_speed_time = now
+        return self.speed
+
 
 
 class DownloadManager:
@@ -71,9 +99,10 @@ class DownloadManager:
         dest: str,
         items: List[Dict[str, Any]],
         concurrency: Optional[int] = None,
+        keep_parts: Optional[bool] = False,
     ) -> None:
         conc = concurrency if concurrency and concurrency > 0 else self.concurrency
-        runner = TaskRunner(task_id, dest, items, concurrency=conc)
+        runner = TaskRunner(task_id, dest, items, concurrency=conc, keep_parts=bool(keep_parts))
         self.runners[task_id] = runner
         runner._main_task = asyncio.create_task(self._run_task(runner))
 
@@ -108,9 +137,47 @@ class DownloadManager:
             t["done_bytes"] = runner.done_bytes
             t["failed_files"] = runner.failed_files
             t["status"] = runner.status
+            t["speed"] = runner.get_speed()
+            t["keep_parts"] = runner.keep_parts
             if runner.errors:
                 t["errors"] = runner.errors
+        else:
+            t["speed"] = 0.0
         return t
+
+    def _record_failure_to_file(self, runner: TaskRunner, disk_path: str, error: str) -> None:
+        """Мгновенно фиксирует ошибку скачивания в _failed_downloads.txt прямо в процессе работы."""
+        try:
+            dest_root = Path(runner.dest)
+            dest_root.mkdir(parents=True, exist_ok=True)
+            report_file = dest_root / "_failed_downloads.txt"
+            from datetime import datetime, timezone
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            if not getattr(runner, "_report_header_written", False):
+                header = [
+                    "",
+                    "=" * 80,
+                    f"ЗАДАЧА: {runner.task_id}",
+                    f"Старт: {now_str}",
+                    f"Папка назначения: {dest_root}",
+                    "ИНФОРМАЦИЯ О ДОКАЧИВАНИИ: При повторном запуске успешно скачанные файлы",
+                    "пропускаются автоматически, будут докачиваться только сбойные.",
+                    "-" * 80,
+                    "Список файлов, которые не удалось загрузить (запись в реальном времени):",
+                    "",
+                ]
+                with open(report_file, "a", encoding="utf-8") as f:
+                    f.write("\n".join(header) + "\n")
+                runner._report_header_written = True
+
+            entry = f"[{now_str}] Файл: {disk_path}\n   Ошибка: {error}\n\n"
+            with open(report_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+                f.flush()
+            logger.info("Сбой скачивания %s мгновенно зафиксирован в %s", disk_path, report_file)
+        except Exception as e:
+            logger.warning("Не удалось записать сбой в отчёт: %s", e)
 
     async def _download_file(
         self,
@@ -143,10 +210,28 @@ class DownloadManager:
             if runner.is_cancelled():
                 return
 
+            file_credited = 0
+
+            def update_file_bytes(current_file_bytes: int) -> None:
+                nonlocal file_credited
+                delta = current_file_bytes - file_credited
+                if delta != 0:
+                    file_credited = current_file_bytes
+                    runner.done_bytes += delta
+
+            logger.info(
+                "[Таска %s] Начало загрузки: %s (%s)",
+                runner.task_id[:8],
+                disk_path,
+                _format_bytes(size),
+            )
+
             max_retries = 3
             last_err = ""
             for attempt in range(max_retries + 1):
                 if runner.is_cancelled():
+                    if file_credited > 0:
+                        runner.done_bytes -= file_credited
                     return
                 try:
                     res = await client.get_resource(disk_path)
@@ -159,23 +244,57 @@ class DownloadManager:
                         dest=target,
                         cancel_check=runner.is_cancelled,
                         expected_size=size,
+                        on_progress=update_file_bytes,
+                        keep_parts=runner.keep_parts,
                     )
+                    if size is not None and size > 0:
+                        update_file_bytes(size)
                     runner.done_files += 1
-                    runner.done_bytes += size
+                    logger.info(
+                        "[Таска %s] Завершено: %s (%s)",
+                        runner.task_id[:8],
+                        disk_path,
+                        _format_bytes(size),
+                    )
                     db.update_task_progress(runner.task_id, runner.done_files, runner.done_bytes, runner.failed_files)
                     return
                 except CancelledDownload:
+                    if file_credited > 0:
+                        runner.done_bytes -= file_credited
                     return
                 except YandexAPIError as e:
-                    last_err = f"HTTP {e.status}: {e.message}"
+                    if e.status == 429:
+                        last_err = "HTTP 429: Превышен лимит запросов Яндекса. Рекомендуется снизить количество воркеров (потоков) до 4–6."
+                    else:
+                        last_err = f"HTTP {e.status}: {e.message}"
                     if e.retryable and attempt < max_retries:
-                        await asyncio.sleep(min(60.0, 2.0 ** attempt))
+                        delay = min(60.0, 2.0 ** attempt)
+                        logger.warning(
+                            "[Таска %s] Сбой API при скачивании %s: %s (попытка %d/%d, повтор через %.1fс)...",
+                            runner.task_id[:8],
+                            disk_path,
+                            last_err,
+                            attempt + 1,
+                            max_retries,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
                         continue
                     break
                 except httpx.TransportError as e:
                     last_err = f"Сетевая ошибка: {type(e).__name__}"
                     if attempt < max_retries:
-                        await asyncio.sleep(min(60.0, 2.0 ** (attempt + 1)))
+                        delay = min(60.0, 2.0 ** (attempt + 1))
+                        logger.warning(
+                            "[Таска %s] Сетевой сбой при скачивании %s: %s (попытка %d/%d, повтор через %.1fс)...",
+                            runner.task_id[:8],
+                            disk_path,
+                            last_err,
+                            attempt + 1,
+                            max_retries,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
                         continue
                     break
                 except Exception as e:
@@ -183,16 +302,28 @@ class DownloadManager:
                     logger.exception("Unexpected error downloading %s", disk_path)
                     break
 
-            # Ошибка скачивания файла
+            # Ошибка скачивания файла после всех попыток
             if not runner.is_cancelled():
+                if file_credited > 0:
+                    runner.done_bytes -= file_credited
+                    file_credited = 0
                 runner.done_files += 1
                 runner.failed_files += 1
+                logger.error(
+                    "[Таска %s] Ошибка скачивания %s: %s (после %d попыток)",
+                    runner.task_id[:8],
+                    disk_path,
+                    last_err,
+                    max_retries + 1,
+                )
                 err_entry = {"path": disk_path, "error": last_err[:300]}
                 runner.errors.append(err_entry)
                 if len(runner.errors) > 50:
                     runner.errors = runner.errors[-50:]
                 db.record_task_error(runner.task_id, disk_path, last_err)
                 db.update_task_progress(runner.task_id, runner.done_files, runner.done_bytes, runner.failed_files)
+                # Мгновенная фиксация ошибки в файле прямо в процессе
+                self._record_failure_to_file(runner, disk_path, last_err)
 
     async def _run_task(self, runner: TaskRunner) -> None:
         try:
@@ -233,96 +364,120 @@ class DownloadManager:
                     self._download_file(runner, client, disk_path, size, dest_root)
                     for disk_path, size in files
                 ]
-                await asyncio.gather(*tasks, return_exceptions=True)
+
+                async def _progress_heartbeat():
+                    try:
+                        while not runner.is_cancelled() and runner.status == "running":
+                            await asyncio.sleep(25.0)
+                            pct = (runner.done_files / runner.total_files * 100) if runner.total_files else 0
+                            spd = runner.get_speed()
+                            logger.info(
+                                "[Таска %s] В процессе: %d/%d файлов (%.1f%%), %s / %s, скорость: %s/с, ошибок: %d",
+                                runner.task_id[:8],
+                                runner.done_files,
+                                runner.total_files,
+                                pct,
+                                _format_bytes(runner.done_bytes),
+                                _format_bytes(runner.total_bytes),
+                                _format_bytes(int(spd)),
+                                runner.failed_files,
+                            )
+                    except asyncio.CancelledError:
+                        pass
+
+                hb_task = asyncio.create_task(_progress_heartbeat())
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                finally:
+                    hb_task.cancel()
 
         except asyncio.CancelledError:
             runner.status = "cancelled"
             db.update_task_status(runner.task_id, "cancelled")
-            return
         except TokenInvalidError:
             runner.status = "error"
             runner.error = "Токен истёк во время выгрузки"
             db.update_task_status(runner.task_id, "error", runner.error)
-            return
         except (YandexAPIError, PathError) as e:
-            msg = e.message if isinstance(e, YandexAPIError) else str(e)
+            if isinstance(e, YandexAPIError) and e.status == 429:
+                msg = "Превышен лимит запросов Яндекса (HTTP 429). Рекомендуется снизить количество воркеров (потоков) в настройках выгрузки до 4–6."
+            else:
+                msg = e.message if isinstance(e, YandexAPIError) else str(e)
             runner.status = "error"
             runner.error = msg
             db.update_task_status(runner.task_id, "error", msg)
-            return
         except Exception as e:
             runner.status = "error"
             runner.error = f"Непредвиденная ошибка: {e}"
             logger.exception("Task %s failed unexpectedly", runner.task_id)
             db.update_task_status(runner.task_id, "error", runner.error)
-            return
 
-        # 3. Финализация
+        # 3. Финализация статуса
         if runner.is_cancelled():
             runner.status = "cancelled"
             db.update_task_status(runner.task_id, "cancelled")
-        elif runner.total_files > 0 and runner.failed_files == runner.total_files:
-            runner.status = "error"
-            runner.error = "Не удалось выгрузить ни один файл"
-            db.finalize_task(
-                runner.task_id,
-                "error",
-                runner.done_files,
-                runner.done_bytes,
-                runner.failed_files,
-                runner.error,
-            )
-        else:
-            runner.status = "done"
-            db.finalize_task(
-                runner.task_id,
-                "done",
-                runner.done_files,
-                runner.done_bytes,
-                runner.failed_files,
-            )
+        elif runner.status != "error":
+            if runner.total_files > 0 and runner.failed_files == runner.total_files:
+                runner.status = "error"
+                runner.error = "Не удалось выгрузить ни один файл"
+                db.finalize_task(
+                    runner.task_id,
+                    "error",
+                    runner.done_files,
+                    runner.done_bytes,
+                    runner.failed_files,
+                    runner.error,
+                )
+            else:
+                runner.status = "done"
+                db.finalize_task(
+                    runner.task_id,
+                    "done",
+                    runner.done_files,
+                    runner.done_bytes,
+                    runner.failed_files,
+                )
 
-        # 4. Фиксация отчёта об ошибках в целевой папке
+        # 4. Финализация отчёта об ошибках в целевой папке
         dest_root = Path(runner.dest)
         report_file = dest_root / "_failed_downloads.txt"
-        if runner.errors and not runner.is_cancelled():
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        if getattr(runner, "_report_header_written", False):
             try:
-                dest_root.mkdir(parents=True, exist_ok=True)
-                from datetime import datetime, timezone
-                now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                lines = [
+                status_str = "ОТМЕНЕНА ПОЛЬЗОВАТЕЛЕМ" if runner.is_cancelled() else (
+                    "ЗАВЕРШЕНА С ОШИБКАМИ" if runner.failed_files > 0 else "ЗАВЕРШЕНА"
+                )
+                footer = [
+                    "-" * 80,
+                    f"Итог задачи: {status_str}",
+                    f"Время завершения: {now_str}",
+                    f"Всего ошибок в задаче: {runner.failed_files} из {runner.total_files}",
                     "=" * 80,
-                    "ОШИБКИ ВЫГРУЗКИ ИЗ ЯНДЕКС ДИСКА",
-                    f"Дата и время: {now_str}",
-                    f"Папка назначения: {dest_root}",
-                    f"Всего файлов с ошибками: {len(runner.errors)} из {runner.total_files}",
-                    "=" * 80,
-                    "",
-                    "Список файлов, которые не удалось загрузить:",
                     "",
                 ]
-                for idx, err in enumerate(runner.errors, 1):
-                    lines.append(f"{idx}. {err.get('path', '')}")
-                    lines.append(f"   Ошибка: {err.get('error', '')}")
-                    lines.append("")
-                lines.extend([
-                    "-" * 80,
-                    "ИНФОРМАЦИЯ О ДОКАЧИВАНИИ:",
-                    "При повторном запуске выгрузки этой же папки уже успешно скачанные файлы",
-                    "будут автоматически пропущены (умное докачивание). Программа попытается",
-                    "загрузить только отсутствующие/неудавшиеся файлы.",
-                    "=" * 80,
-                ])
-                report_file.write_text("\n".join(lines), encoding="utf-8")
-                logger.info("Отчёт об ошибках сохранён в %s", report_file)
+                with open(report_file, "a", encoding="utf-8") as f:
+                    f.write("\n".join(footer) + "\n")
             except Exception as e:
-                logger.warning("Не удалось записать отчёт об ошибках: %s", e)
+                logger.warning("Не удалось финализировать отчёт: %s", e)
         elif runner.status == "done" and runner.failed_files == 0:
-            try:
-                if report_file.is_file():
-                    report_file.unlink(missing_ok=True)
-            except Exception:
-                pass
+            if report_file.is_file():
+                try:
+                    lines = [
+                        "",
+                        "=" * 80,
+                        f"ЗАДАЧА: {runner.task_id}",
+                        f"Дата и время: {now_str}",
+                        "Статус: УСПЕШНО ЗАВЕРШЕНА",
+                        f"Все файлы ({runner.total_files}) успешно скачаны без ошибок.",
+                        "=" * 80,
+                        "",
+                    ]
+                    with open(report_file, "a", encoding="utf-8") as f:
+                        f.write("\n".join(lines) + "\n")
+                except Exception:
+                    pass
 
 
 download_manager = DownloadManager()

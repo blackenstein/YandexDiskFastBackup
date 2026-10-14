@@ -93,11 +93,12 @@ async def test_task_download_end_to_end(async_client, monkeypatch, tmp_path):
     async def fake_get_resource(self, path):
         return {"file": "http://fake-cdn/download", "size": 10}
 
-    async def fake_stream(self, url, dest, cancel_check=None, chunk_size=1, expected_size=None):
+    async def fake_stream(self, url, dest, cancel_check=None, chunk_size=1, expected_size=None, *args, **kwargs):
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"0123456789")
         return 10
+
 
     monkeypatch.setattr(YandexClient, "iter_files", fake_iter_files)
     monkeypatch.setattr(YandexClient, "get_resource", fake_get_resource)
@@ -282,6 +283,63 @@ async def test_failed_downloads_report_created(async_client, monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_failed_downloads_report_appends_across_tasks(async_client, monkeypatch, tmp_path):
+    db.save_account(token="dummy-tok", login="test", total_bytes=1000, used_bytes=100)
+    monkeypatch.setattr(config, "DOWNLOAD_ROOT", tmp_path)
+
+    async def fake_iter1(self, items):
+        yield "/dir/bad1.txt", 10
+
+    async def fake_res1(self, path):
+        from app.yandex import YandexAPIError
+        raise YandexAPIError(500, "Error 1")
+
+    monkeypatch.setattr(YandexClient, "iter_files", fake_iter1)
+    monkeypatch.setattr(YandexClient, "get_resource", fake_res1)
+
+    resp = await async_client.post(
+        "/api/tasks/",
+        json={"dest": str(tmp_path), "items": [{"path": "/dir", "type": "folder"}]},
+    )
+    tid1 = resp.json()["id"]
+    for _ in range(50):
+        r = await async_client.get(f"/api/tasks/{tid1}/")
+        if r.json()["status"] in ("done", "error"):
+            break
+        await asyncio.sleep(0.05)
+
+    async def fake_iter2(self, items):
+        yield "/dir/bad2.txt", 20
+
+    async def fake_res2(self, path):
+        from app.yandex import YandexAPIError
+        raise YandexAPIError(502, "Error 2")
+
+    monkeypatch.setattr(YandexClient, "iter_files", fake_iter2)
+    monkeypatch.setattr(YandexClient, "get_resource", fake_res2)
+
+    resp = await async_client.post(
+        "/api/tasks/",
+        json={"dest": str(tmp_path), "items": [{"path": "/dir", "type": "folder"}]},
+    )
+    tid2 = resp.json()["id"]
+    for _ in range(50):
+        r = await async_client.get(f"/api/tasks/{tid2}/")
+        if r.json()["status"] in ("done", "error"):
+            break
+        await asyncio.sleep(0.05)
+
+    report = tmp_path / "_failed_downloads.txt"
+    assert report.is_file()
+    content = report.read_text(encoding="utf-8")
+    assert tid1 in content
+    assert "bad1.txt" in content
+    assert tid2 in content
+    assert "bad2.txt" in content
+
+
+
+@pytest.mark.asyncio
 async def test_create_task_with_custom_concurrency(async_client, monkeypatch, tmp_path):
     db.save_account(token="dummy-tok", login="test", total_bytes=1000, used_bytes=100)
     monkeypatch.setattr(config, "DOWNLOAD_ROOT", tmp_path)
@@ -302,3 +360,30 @@ async def test_create_task_with_custom_concurrency(async_client, monkeypatch, tm
     runner = download_manager.runners.get(tid)
     assert runner is not None
     assert runner.concurrency == 16
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_keep_parts(async_client, monkeypatch, tmp_path):
+    db.save_account(token="dummy-tok", login="test", total_bytes=1000, used_bytes=100)
+    monkeypatch.setattr(config, "DOWNLOAD_ROOT", tmp_path)
+
+    async def fake_iter_files(self, items):
+        if False:
+            yield
+
+    monkeypatch.setattr(YandexClient, "iter_files", fake_iter_files)
+
+    resp = await async_client.post(
+        "/api/tasks/",
+        json={"dest": str(tmp_path), "items": [{"path": "/dir", "type": "folder"}], "keep_parts": True},
+    )
+    assert resp.status_code == 201
+    tid = resp.json()["id"]
+
+    runner = download_manager.runners.get(tid)
+    assert runner is not None
+    assert runner.keep_parts is True
+
+    task = db.get_task(tid)
+    assert task["keep_parts"] is True
+

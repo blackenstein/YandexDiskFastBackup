@@ -120,8 +120,8 @@ export const api = {
   oauthUrl: () => request("/api/oauth-url/"),
   browse: (path) => request(`/api/disk/browse/?path=${encodeURIComponent(path)}`),
   tasks: () => request("/api/tasks/"),
-  createTask: (dest, items, concurrency) =>
-    request("/api/tasks/", { method: "POST", body: JSON.stringify({ dest, items, concurrency }) }),
+  createTask: (dest, items, concurrency, keep_parts = false) =>
+    request("/api/tasks/", { method: "POST", body: JSON.stringify({ dest, items, concurrency, keep_parts }) }),
   cancelTask: (id) => request(`/api/tasks/${id}/cancel/`, { method: "POST" }),
   deleteTask: (id) => request(`/api/tasks/${id}/`, { method: "DELETE" }),
   browseFolder: () => request("/api/browse-folder/", { method: "POST" }),
@@ -142,11 +142,11 @@ const state = {
   taskPanel: {
     dest: "./downloads",
     concurrency: 8,
+    keepParts: false,
     busy: false,
     msg: null,
     msgError: null,
     showErrorsMap: {}, // task_id -> boolean
-    speedTracker: {},  // task_id -> { bytes, at, speed }
   },
   tokenScreen: {
     tokenInput: "",
@@ -459,22 +459,6 @@ function renderBrowser() {
   }
 }
 
-function updateSpeeds() {
-  const now = Date.now();
-  state.tasks.forEach((task) => {
-    if (task.status !== "running") {
-      delete state.taskPanel.speedTracker[task.id];
-      return;
-    }
-    const prev = state.taskPanel.speedTracker[task.id] || { bytes: task.done_bytes, at: now, speed: 0 };
-    const dt = (now - prev.at) / 1000;
-    if (dt > 0.5) {
-      const speed = Math.max(0, (task.done_bytes - prev.bytes) / dt);
-      state.taskPanel.speedTracker[task.id] = { bytes: task.done_bytes, at: now, speed };
-    }
-  });
-}
-
 // Инициализирует статическую разметку панели задач один раз (без лагов при наборе текста)
 function initTaskPanelLayout() {
   const panel = document.getElementById("task-panel-container");
@@ -514,7 +498,23 @@ function initTaskPanelLayout() {
         value="${tp.concurrency}"
       />
     </div>
-    <p class="hint small">
+    <div style="margin-top:12px; padding:10px 12px; background:var(--bg-subtle, rgba(0,0,0,0.02)); border:1px solid var(--border, #e5e7eb); border-radius:8px;">
+      <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer; font-size:13px; color:inherit;">
+        <input
+          id="keep-parts-checkbox"
+          type="checkbox"
+          style="margin-top:2px; cursor:pointer;"
+          ${tp.keepParts ? "checked" : ""}
+        />
+        <span>
+          <strong>Сохранять недокачанные файлы (.part)</strong>
+          <span class="hint small" style="display:block; margin-top:3px; font-size:11.5px; line-height:1.35; opacity:0.85;">
+            Сохранение недокачанных файлов в надежде на то, что они докачаются после восстановления инфраструктуры Яндекса
+          </span>
+        </span>
+      </label>
+    </div>
+    <p class="hint small" style="margin-top:8px;">
       Можно указать любой путь на любом диске. Уже скачанные файлы пропускаются автоматически.
     </p>
 
@@ -535,6 +535,13 @@ function initTaskPanelLayout() {
   concInput.addEventListener("input", (e) => {
     tp.concurrency = parseInt(e.target.value) || 8;
   });
+
+  const keepPartsCb = panel.querySelector("#keep-parts-checkbox");
+  if (keepPartsCb) {
+    keepPartsCb.addEventListener("change", (e) => {
+      tp.keepParts = e.target.checked;
+    });
+  }
 
   const browseBtn = panel.querySelector("#btn-browse-folder");
   browseBtn.addEventListener("click", async () => {
@@ -562,7 +569,7 @@ function initTaskPanelLayout() {
     updateTasksListOnly();
     try {
       const items = Object.values(state.selected);
-      await api.createTask(tp.dest, items, tp.concurrency);
+      await api.createTask(tp.dest, items, tp.concurrency, tp.keepParts);
       state.selected = {};
       tp.msg = "Выгрузка запущена";
       await refreshTasks();
@@ -604,8 +611,6 @@ function updateTasksListOnly() {
   const listContainer = panel.querySelector("#tasks-list-container");
   if (!listContainer) return;
 
-  updateSpeeds();
-
   if (state.tasks.length === 0) {
     listContainer.innerHTML = `<p class="muted">Задач пока нет</p>`;
   } else {
@@ -616,21 +621,29 @@ function updateTasksListOnly() {
 
 function renderTaskCard(task) {
   const st = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
-  const pct = task.total_files ? Math.min(100, (task.done_files / task.total_files) * 100) : 0;
+  // Прогресс строго по количеству обработанных файлов для стабильности и предсказуемости
+  const pct =
+    task.total_files > 0
+      ? Math.min(100, (task.done_files / task.total_files) * 100)
+      : 0;
   const active = task.status === "running" || task.status === "pending";
+
   const label =
     task.failed_files > 0 && (task.status === "done" || task.status === "error")
       ? `С ошибками: ${task.failed_files}`
       : st.label;
 
   const showErrors = Boolean(state.taskPanel.showErrorsMap[task.id]);
-  const speed = state.taskPanel.speedTracker[task.id]?.speed || 0;
+  const speed = task.speed || 0;
 
   return `
     <div class="task-card task-${task.status}">
       <div class="task-head">
         <span class="task-title" title="${task.dest}">${task.dest}</span>
-        <span class="chip ${st.cls}">${label}</span>
+        <div style="display:flex; align-items:center; gap:6px;">
+          ${task.keep_parts ? `<span title="Сохранение недокачанных .part включено" style="font-size:11px; font-weight:600; padding:2px 6px; border-radius:4px; background:#e0f2fe; color:#0369a1;">.part</span>` : ""}
+          <span class="chip ${st.cls}">${label}</span>
+        </div>
       </div>
 
       ${
@@ -640,9 +653,20 @@ function renderTaskCard(task) {
           <div class="progress-fill" style="width: ${pct}%"></div>
         </div>
         <div class="task-meta">
-          <span>${task.done_files} / ${task.total_files || "…"} файлов</span>
+          <span>${task.done_files} / ${task.total_files || "…"} файлов (${Math.round(pct)}%)</span>
           <span>${formatBytes(task.done_bytes)} из ${formatBytes(task.total_bytes)}</span>
-          ${task.status === "running" && speed > 0 ? `<span>${formatSpeed(speed)}</span>` : ""}
+          ${task.status === "running" && speed > 0 ? `<span>⚡ ${formatSpeed(speed)}</span>` : ""}
+        </div>
+      `
+          : ""
+      }
+
+      ${
+        (task.error && task.error.includes("429")) || (task.errors && task.errors.some((e) => e.error && e.error.includes("429")))
+          ? `
+        <div style="background: #fff3cd; color: #856404; border: 1px solid #ffeeba; border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13px; line-height: 1.4;">
+          ⚠️ <strong>Превышен лимит запросов Яндекса (HTTP 429).</strong><br>
+          Рекомендуется снизить количество воркеров (потоков) в настройках выгрузки до <strong>4–6</strong>.
         </div>
       `
           : ""
@@ -729,7 +753,8 @@ function attachTaskCardEvents(container) {
       const task = state.tasks.find((t) => t.id === btn.dataset.id);
       if (task && task.errors) {
         const items = task.errors.map((e) => ({ path: e.path, type: "file" }));
-        await api.createTask(task.dest, items, state.taskPanel.concurrency).catch(() => {});
+        const keepParts = Boolean(task.keep_parts);
+        await api.createTask(task.dest, items, state.taskPanel.concurrency, keepParts).catch(() => {});
         await refreshTasks();
       }
     });

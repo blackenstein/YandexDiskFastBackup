@@ -1,6 +1,7 @@
 """Асинхронный клиент API Яндекс Диска (https://yandex.ru/dev/disk-api)."""
 
 import asyncio
+import logging
 import os
 import socket
 import time
@@ -10,6 +11,10 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 import httpx
 
 from .config import FORCE_IPV4
+
+logger = logging.getLogger(__name__)
+
+
 
 BASE_URL = "https://cloud-api.yandex.net/v1"
 CHUNK_SIZE = 1024 * 1024
@@ -77,7 +82,7 @@ class YandexClient:
             install_ipv4_resolver()
 
         if timeout is None:
-            timeout = httpx.Timeout(30.0, connect=30.0, write=30.0, pool=30.0)
+            timeout = httpx.Timeout(60.0, connect=30.0, read=90.0, write=30.0, pool=30.0)
 
         self._http = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
@@ -285,42 +290,155 @@ class YandexClient:
         cancel_check: Optional[Callable[[], bool]] = None,
         chunk_size: int = CHUNK_SIZE,
         expected_size: Optional[int] = None,
+        on_progress: Optional[Callable[[int], None]] = None,
+        keep_parts: bool = False,
     ) -> int:
-        """Стримит файл с download_url в dest (через .part-файл). Возвращает число байт."""
+        """Стримит файл с download_url в dest через гибридную докачку (.part).
+
+        1. Если .part уже существует и его размер валиден:
+           - Пробуем докачать через Range: bytes=OFFSET-.
+           - Если сервер вернул 206: дописываем в конец ("ab").
+           - Если сервер вернул 200: сервер проигнорировал Range, скачиваем с нуля ("wb").
+           - Если сервер сбросил Range (RemoteProtocolError/IncompleteRead/416) до передачи данных:
+             - если keep_parts=True: сохраняем .part на диске и сообщаем об ошибке сервера;
+             - если keep_parts=False: удаляем битый .part и прозрачно скачиваем с нуля чистым GET.
+        2. Если .part не существует:
+           - Чистый потоковый GET с нуля ("wb").
+        3. По окончании сверяем размер (если expected_size передан)
+           и атомарно перемещаем .part в dest.
+        """
         dest = Path(dest)
         tmp = dest.with_name(dest.name + ".part")
         dest.parent.mkdir(parents=True, exist_ok=True)
+
+        initial_bytes = 0
+        if tmp.is_file():
+            try:
+                st_size = tmp.stat().st_size
+                if expected_size is not None and st_size >= int(expected_size):
+                    # Файл уже больше или равен ожидаемому размеру, но не был переименован
+                    if not keep_parts:
+                        tmp.unlink(missing_ok=True)
+                elif st_size > 0:
+                    initial_bytes = st_size
+            except Exception:
+                initial_bytes = 0
+
+        async def _download_from_scratch() -> int:
+            nonlocal initial_bytes
+            initial_bytes = 0
+            if on_progress:
+                on_progress(0)
+            written_scratch = 0
+            async with self._http.stream("GET", url) as resp:
+                if resp.status_code == 429:
+                    raise YandexAPIError(
+                        429,
+                        "Превышен лимит запросов Яндекса (HTTP 429). Рекомендуется снизить количество воркеров.",
+                        retryable=True,
+                        retry_after=self._retry_after(resp, default=5.0),
+                    )
+                if resp.status_code >= 400:
+                    raise YandexAPIError(resp.status_code, f"Ошибка загрузки файла: HTTP {resp.status_code}")
+
+                with open(tmp, "wb") as f:
+                    async for chunk in resp.aiter_bytes(chunk_size):
+                        if cancel_check and cancel_check():
+                            f.close()
+                            raise CancelledDownload()
+                        f.write(chunk)
+                        written_scratch += len(chunk)
+                        if on_progress:
+                            on_progress(written_scratch)
+            return written_scratch
+
         written = 0
 
-        async with self._http.stream("GET", url) as resp:
-            if resp.status_code == 429:
-                raise YandexAPIError(
-                    429,
-                    "Превышен лимит скачиваний (429)",
-                    retryable=True,
-                    retry_after=self._retry_after(resp, default=5.0),
-                )
-            if resp.status_code >= 400:
-                raise YandexAPIError(resp.status_code, f"Ошибка загрузки файла: HTTP {resp.status_code}")
-
-            with open(tmp, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size):
-                    if cancel_check and cancel_check():
-                        f.close()
+        if initial_bytes > 0:
+            range_headers = {"Range": f"bytes={initial_bytes}-"}
+            received_in_range = 0
+            try:
+                if on_progress:
+                    on_progress(initial_bytes)
+                async with self._http.stream("GET", url, headers=range_headers) as resp:
+                    if resp.status_code == 429:
+                        raise YandexAPIError(
+                            429,
+                            "Превышен лимит запросов Яндекса (HTTP 429). Рекомендуется снизить количество воркеров.",
+                            retryable=True,
+                            retry_after=self._retry_after(resp, default=5.0),
+                        )
+                    elif resp.status_code == 206:
+                        with open(tmp, "ab") as f:
+                            async for chunk in resp.aiter_bytes(chunk_size):
+                                if cancel_check and cancel_check():
+                                    f.close()
+                                    raise CancelledDownload()
+                                f.write(chunk)
+                                received_in_range += len(chunk)
+                                if on_progress:
+                                    on_progress(initial_bytes + received_in_range)
+                        written = initial_bytes + received_in_range
+                    elif resp.status_code == 200:
+                        logger.info("Сервер проигнорировал Range, скачиваем с нуля: %s", dest.name)
+                        with open(tmp, "wb") as f:
+                            async for chunk in resp.aiter_bytes(chunk_size):
+                                if cancel_check and cancel_check():
+                                    f.close()
+                                    raise CancelledDownload()
+                                f.write(chunk)
+                                written += len(chunk)
+                                if on_progress:
+                                    on_progress(written)
+                    elif resp.status_code == 416:
+                        if keep_parts and initial_bytes > 0:
+                            logger.warning("Диапазон Range не принят сервером (416), keep_parts включён, сохраняем .part: %s", dest.name)
+                            raise YandexAPIError(416, f"Сервер отклонил Range (416). Файл .part ({initial_bytes:,} байт) сохранён для будущей докачки.", retryable=True)
+                        logger.warning("Диапазон Range не принят сервером (416), сброс .part: %s", dest.name)
                         tmp.unlink(missing_ok=True)
-                        raise CancelledDownload()
-                    f.write(chunk)
-                    written += len(chunk)
+                        written = await _download_from_scratch()
+                    else:
+                        raise YandexAPIError(resp.status_code, f"Ошибка загрузки файла: HTTP {resp.status_code}")
+            except (CancelledDownload, YandexAPIError):
+                raise
+            except (httpx.TransportError, Exception) as e:
+                if received_in_range == 0:
+                    if keep_parts and initial_bytes > 0:
+                        logger.warning(
+                            "Сервер сбросил Range (%s: %s). keep_parts=True: сохраняем .part (%d байт) для будущей докачки: %s",
+                            type(e).__name__,
+                            e,
+                            initial_bytes,
+                            dest.name,
+                        )
+                        raise YandexAPIError(
+                            503,
+                            f"Сервер Яндекса временно сбросил Range-соединение ({type(e).__name__}). Файл .part ({initial_bytes:,} байт) сохранён для будущей докачки.",
+                            retryable=True,
+                        )
+                    logger.warning(
+                        "Сервер сбросил Range-запрос (%s: %s). Фоллбэк: скачиваем с нуля %s",
+                        type(e).__name__,
+                        e,
+                        dest.name,
+                    )
+                    tmp.unlink(missing_ok=True)
+                    written = await _download_from_scratch()
+                else:
+                    raise
+        else:
+            written = await _download_from_scratch()
 
         if expected_size is not None and written != int(expected_size):
-            tmp.unlink(missing_ok=True)
+            if not keep_parts:
+                tmp.unlink(missing_ok=True)
             retryable = written > 0
             raise YandexAPIError(
                 502,
-                f"CDN отправил {written:,} из {int(expected_size):,} байт (повреждённая копия файла на стороне Яндекса)",
+                f"CDN передал {written:,} из {int(expected_size):,} байт"
+                + (" (файл .part сохранён для будущей докачки)" if keep_parts else " (прервано соединение или повреждённая копия)"),
                 retryable=retryable,
             )
 
-        # Атомарная замена
         os.replace(tmp, dest)
         return written

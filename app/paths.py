@@ -53,3 +53,5 @@ def safe_join(root, rel):
     if p == root or root not in p.parents:
         raise PathError(f"Некорректный путь: {rel}")
     return p
+
+
