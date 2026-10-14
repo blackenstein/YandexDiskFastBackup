@@ -270,6 +270,14 @@ class Database:
             conn.execute("DELETE FROM task_errors WHERE task_id = ?", (task_id,))
             return cur.rowcount > 0
 
+    def get_last_dest(self) -> Optional[str]:
+        """Возвращает последнюю использованную папку назначения из истории задач."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT dest FROM tasks ORDER BY created_at DESC LIMIT 1").fetchone()
+            if row and row["dest"]:
+                return str(row["dest"])
+            return None
+
 
 # Глобальный инстанс БД
 db = Database()

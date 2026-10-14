@@ -125,6 +125,8 @@ export const api = {
   cancelTask: (id) => request(`/api/tasks/${id}/cancel/`, { method: "POST" }),
   deleteTask: (id) => request(`/api/tasks/${id}/`, { method: "DELETE" }),
   browseFolder: () => request("/api/browse-folder/", { method: "POST" }),
+  config: () => request("/api/config/"),
+  verify: (dest, items) => request("/api/verify/", { method: "POST", body: JSON.stringify({ dest, items }) }),
 };
 
 // --- Состояние приложения ---
@@ -140,13 +142,19 @@ const state = {
     error: null,
   },
   taskPanel: {
-    dest: "./downloads",
+    dest: localStorage.getItem("ydl_last_dest") || "./downloads",
     concurrency: 8,
     keepParts: false,
     busy: false,
     msg: null,
     msgError: null,
     showErrorsMap: {}, // task_id -> boolean
+  },
+  verify: {
+    loading: false,
+    result: null,
+    error: null,
+    showDetails: false,
   },
   tokenScreen: {
     tokenInput: "",
@@ -518,10 +526,16 @@ function initTaskPanelLayout() {
       Можно указать любой путь на любом диске. Уже скачанные файлы пропускаются автоматически.
     </p>
 
-    <button id="btn-start-download" class="btn btn-primary btn-block" disabled>
-      Скачать выбранное (0)
-    </button>
+    <div style="display:flex; gap:8px; margin-top:12px;">
+      <button id="btn-start-download" class="btn btn-primary" style="flex:1;" disabled>
+        Скачать (0)
+      </button>
+      <button id="btn-verify-download" class="btn btn-ghost" style="flex:1;" title="Сверить файлы на Яндекс Диске с файлами в папке на локальном диске">
+        🔍 Сверить файлы
+      </button>
+    </div>
 
+    <div id="verify-result-container"></div>
     <div id="panel-alerts-container"></div>
     <div id="tasks-list-container" class="tasks-list"></div>
   `;
@@ -529,6 +543,7 @@ function initTaskPanelLayout() {
   const destInput = panel.querySelector("#dest-input");
   destInput.addEventListener("input", (e) => {
     tp.dest = e.target.value;
+    localStorage.setItem("ydl_last_dest", tp.dest);
   });
 
   const concInput = panel.querySelector("#concurrency-input");
@@ -552,6 +567,7 @@ function initTaskPanelLayout() {
       if (res && res.path) {
         tp.dest = res.path;
         destInput.value = res.path;
+        localStorage.setItem("ydl_last_dest", res.path);
       }
     } catch (e) {
       console.warn("Folder dialog error:", e);
@@ -566,6 +582,7 @@ function initTaskPanelLayout() {
     tp.busy = true;
     tp.msg = null;
     tp.msgError = null;
+    localStorage.setItem("ydl_last_dest", tp.dest);
     updateTasksListOnly();
     try {
       const items = Object.values(state.selected);
@@ -578,6 +595,295 @@ function initTaskPanelLayout() {
       tp.msgError = err.message;
     } finally {
       tp.busy = false;
+      updateTasksListOnly();
+    }
+  });
+
+  const verifyBtn = panel.querySelector("#btn-verify-download");
+  if (verifyBtn) {
+    verifyBtn.addEventListener("click", async () => {
+      const selected = Object.values(state.selected);
+      const toVerify = selected.length > 0 ? selected : [{ path: state.browser.path || "/", type: "folder" }];
+      state.verify.loading = true;
+      state.verify.error = null;
+      state.verify.result = null;
+      state.verify.showDetails = false;
+      renderVerifyContainer();
+      updateTasksListOnly();
+
+      try {
+        const res = await api.verify(tp.dest, toVerify);
+        state.verify.result = res;
+        localStorage.setItem("ydl_last_dest", tp.dest);
+      } catch (err) {
+        state.verify.error = err.message || "Ошибка сверки";
+      } finally {
+        state.verify.loading = false;
+        renderVerifyContainer();
+        updateTasksListOnly();
+      }
+    });
+  }
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportVerifyReport(res, mode) {
+  if (!res) return;
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const fileDate = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+  const isMissingOnly = mode === "missing";
+  const items = (res.details || []).filter((d) => !isMissingOnly || d.status !== "ok");
+
+  const total = res.total_files || 0;
+  const matched = res.matched_files || 0;
+  const missing = res.missing_files || 0;
+  const parts = res.part_files || 0;
+  const mismatched = res.mismatched_files || 0;
+  const pct = total > 0 ? Math.round((matched / total) * 100) : 100;
+  const needDownload = res.missing_items ? res.missing_items.length : (missing + parts + mismatched);
+
+  const lines = [
+    "=".repeat(80),
+    isMissingOnly
+      ? "ОТЧЁТ СВЕРКИ: НЕДОКАЧАННЫЕ И ОТСУТСТВУЮЩИЕ ФАЙЛЫ"
+      : "ОТЧЁТ СВЕРКИ: ВСЕ ПРОВЕРЕННЫЕ ФАЙЛЫ (ПОЛНЫЙ СПИСОК)",
+    `Дата сверки:              ${dateStr}`,
+    `Папка на локальном диске: ${res.dest}`,
+    `Всего файлов в облаке:    ${total} (${formatBytes(res.total_bytes)})`,
+    "-".repeat(80),
+    "СВОДНАЯ СТАТИСТИКА:",
+    `  • Целы и совпадают:     ${matched} (${pct}%) — ${formatBytes(res.matched_bytes)}`,
+    `  • Отсутствуют:          ${missing} — ${formatBytes(res.missing_bytes)}`,
+    `  • Недокачаны (.part):   ${parts} — ${formatBytes(res.part_bytes)}`,
+    `  • Не совпал размер:     ${mismatched} — ${formatBytes(res.mismatched_bytes)}`,
+    `  • Требуют загрузки:     ${needDownload} файлов`,
+    "=".repeat(80),
+    "",
+  ];
+
+  if (items.length === 0) {
+    if (isMissingOnly) {
+      lines.push("Все файлы на локальном диске в порядке! Отсутствующих и недокачанных файлов нет.");
+    } else {
+      lines.push("Список проверенных файлов пуст.");
+    }
+  } else {
+    lines.push(isMissingOnly ? `СПИСОК ФАЙЛОВ, ТРЕБУЮЩИХ ВНИМАНИЯ (${items.length}):` : `СПИСОК ВСЕХ ФАЙЛОВ (${items.length}):`);
+    lines.push("");
+
+    items.forEach((item, idx) => {
+      let stLabel = "[OK]";
+      let sizeInfo = formatBytes(item.cloud_size);
+
+      if (item.status === "missing") {
+        stLabel = "[ОТСУТСТВУЕТ]         ";
+        sizeInfo = `в облаке: ${formatBytes(item.cloud_size)}`;
+      } else if (item.status === "part") {
+        stLabel = "[НЕДОКАЧАН .PART]     ";
+        sizeInfo = `локально: ${formatBytes(item.local_size)} из ${formatBytes(item.cloud_size)}`;
+      } else if (item.status === "mismatch") {
+        stLabel = "[НЕСОВПАДЕНИЕ РАЗМЕРА]";
+        sizeInfo = `локально: ${formatBytes(item.local_size)} != в облаке: ${formatBytes(item.cloud_size)}`;
+      } else {
+        stLabel = "[OK]                  ";
+        sizeInfo = `размер: ${formatBytes(item.cloud_size)}`;
+      }
+
+      lines.push(`${pad(idx + 1)}. ${stLabel} ${item.path} (${sizeInfo})`);
+    });
+  }
+
+  lines.push("");
+  lines.push("=".repeat(80));
+  lines.push("Сгенерировано приложением Выгрузка из Яндекс Диска");
+
+  const filename = isMissingOnly
+    ? `отчет_недокачанные_${fileDate}.txt`
+    : `отчет_все_файлы_${fileDate}.txt`;
+
+  downloadTextFile(filename, lines.join("\r\n"));
+}
+
+function renderVerifyContainer() {
+  const panel = document.getElementById("task-panel-container");
+  if (!panel) return;
+  const container = panel.querySelector("#verify-result-container");
+  if (!container) return;
+
+  const vState = state.verify;
+  if (vState.loading) {
+    container.innerHTML = `
+      <div class="verify-card" style="text-align:center; padding:14px;">
+        <span class="muted">⏳ Выполняется сверка файлов с локальной папкой…</span>
+      </div>
+    `;
+    return;
+  }
+
+  if (vState.error) {
+    container.innerHTML = `
+      <div class="alert error" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>⚠️ Ошибка сверки: ${vState.error}</span>
+        <button class="link-btn" id="btn-close-verify" style="color:inherit; font-weight:bold; cursor:pointer;">✕</button>
+      </div>
+    `;
+    container.querySelector("#btn-close-verify")?.addEventListener("click", () => {
+      state.verify.error = null;
+      renderVerifyContainer();
+    });
+    return;
+  }
+
+  const res = vState.result;
+  if (!res) {
+    container.innerHTML = "";
+    return;
+  }
+
+  const total = res.total_files || 0;
+  const matched = res.matched_files || 0;
+  const missing = res.missing_files || 0;
+  const parts = res.part_files || 0;
+  const mismatched = res.mismatched_files || 0;
+  const pct = total > 0 ? Math.round((matched / total) * 100) : 100;
+  const hasIssues = (missing + parts + mismatched) > 0;
+
+  container.innerHTML = `
+    <div class="verify-card">
+      <div class="verify-header">
+        <h3 title="${res.dest}">🔍 Сверка с: ${res.dest}</h3>
+        <button id="btn-close-verify" class="link-btn" style="color:var(--text-2); font-size:16px; cursor:pointer;" title="Закрыть">✕</button>
+      </div>
+      <div style="font-size:12px; color:var(--text-2); margin-bottom:6px;">
+        Обнаружено в облаке: <b>${total}</b> файлов (${formatBytes(res.total_bytes)})
+      </div>
+
+      <div class="verify-stats-grid">
+        <div class="verify-stat-item" style="border-left: 3px solid #16a34a;">
+          <span class="verify-stat-val" style="color:#16a34a;">${matched} (${pct}%)</span>
+          <span class="verify-stat-lbl">Целы и совпадают</span>
+        </div>
+        <div class="verify-stat-item" style="border-left: 3px solid ${missing > 0 ? '#dc2626' : 'var(--border)'};">
+          <span class="verify-stat-val" style="color:${missing > 0 ? '#dc2626' : 'inherit'};">${missing}</span>
+          <span class="verify-stat-lbl">Отсутствуют</span>
+        </div>
+        <div class="verify-stat-item" style="border-left: 3px solid ${parts > 0 ? '#d97706' : 'var(--border)'};">
+          <span class="verify-stat-val" style="color:${parts > 0 ? '#d97706' : 'inherit'};">${parts}</span>
+          <span class="verify-stat-lbl">Недокачаны (.part)</span>
+        </div>
+        <div class="verify-stat-item" style="border-left: 3px solid ${mismatched > 0 ? '#ea580c' : 'var(--border)'};">
+          <span class="verify-stat-val" style="color:${mismatched > 0 ? '#ea580c' : 'inherit'};">${mismatched}</span>
+          <span class="verify-stat-lbl">Размер не совпал</span>
+        </div>
+      </div>
+
+      ${
+        hasIssues && res.missing_items && res.missing_items.length > 0
+          ? `
+        <button id="btn-download-missing" class="btn btn-primary btn-block btn-small" style="margin-top:8px;">
+          📥 Скачать недостающие (${res.missing_items.length})
+        </button>
+      `
+          : `
+        <div style="color:#16a34a; font-weight:500; font-size:12px; margin-top:6px; text-align:center;">
+          🎉 Все проверенные файлы совпадают с диском!
+        </div>
+      `
+      }
+
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <button id="btn-export-missing-txt" class="btn btn-ghost btn-small" style="flex:1;" title="Экспортировать список отсутствующих и недокачанных файлов в .txt">
+          📄 Недокачанные (.txt)
+        </button>
+        <button id="btn-export-all-txt" class="btn btn-ghost btn-small" style="flex:1;" title="Экспортировать полный отчёт обо всех проверенных файлах в .txt">
+          📄 Все файлы (.txt)
+        </button>
+      </div>
+
+      ${
+        res.details && res.details.length > 0
+          ? `
+        <div style="text-align:right; margin-top:6px;">
+          <button id="btn-toggle-verify-details" class="link-btn">
+            ${vState.showDetails ? "Скрыть детали" : `Показать файлы (${res.details.length})`}
+          </button>
+        </div>
+        ${
+          vState.showDetails
+            ? `
+          <ul class="verify-details-list">
+            ${res.details
+              .slice(0, 300)
+              .map((d) => {
+                let badge = `<span style="color:#16a34a;">OK</span>`;
+                if (d.status === "missing") badge = `<span style="color:#dc2626;">Отсутствует</span>`;
+                else if (d.status === "part") badge = `<span style="color:#d97706;">.part (${formatBytes(d.local_size)})</span>`;
+                else if (d.status === "mismatch") badge = `<span style="color:#ea580c;">Размер (${formatBytes(d.local_size)} ≠ ${formatBytes(d.cloud_size)})</span>`;
+                return `
+                  <li>
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:65%;" title="${d.path}">${d.path}</span>
+                    <span>${badge}</span>
+                  </li>
+                `;
+              })
+              .join("")}
+            ${res.details.length > 300 ? `<li style="text-align:center; padding:6px; color:var(--text-2); font-size:11px; font-style:italic;">Показаны первые 300 файлов (полный список доступен при экспорте в .txt)</li>` : ""}
+          </ul>
+        `
+            : ""
+        }
+      `
+          : ""
+      }
+    </div>
+  `;
+
+  container.querySelector("#btn-close-verify")?.addEventListener("click", () => {
+    state.verify.result = null;
+    renderVerifyContainer();
+  });
+
+  container.querySelector("#btn-toggle-verify-details")?.addEventListener("click", () => {
+    state.verify.showDetails = !state.verify.showDetails;
+    renderVerifyContainer();
+  });
+
+  container.querySelector("#btn-export-missing-txt")?.addEventListener("click", () => {
+    exportVerifyReport(res, "missing");
+  });
+
+  container.querySelector("#btn-export-all-txt")?.addEventListener("click", () => {
+    exportVerifyReport(res, "all");
+  });
+
+  container.querySelector("#btn-download-missing")?.addEventListener("click", async () => {
+    const tp = state.taskPanel;
+    tp.busy = true;
+    updateTasksListOnly();
+    try {
+      await api.createTask(res.dest, res.missing_items, tp.concurrency, tp.keepParts);
+      tp.msg = `Запущена выгрузка недостающих файлов (${res.missing_items.length})`;
+      state.verify.result = null;
+      await refreshTasks();
+    } catch (e) {
+      tp.msgError = e.message;
+    } finally {
+      tp.busy = false;
+      renderVerifyContainer();
       updateTasksListOnly();
     }
   });
@@ -595,7 +901,18 @@ function updateTasksListOnly() {
   const startBtn = panel.querySelector("#btn-start-download");
   if (startBtn) {
     startBtn.disabled = tp.busy || count === 0;
-    startBtn.innerText = tp.busy ? "Запускаем…" : `Скачать выбранное (${count})`;
+    startBtn.innerText = tp.busy ? "Запускаем…" : `Скачать (${count})`;
+  }
+
+  // Обновляем кнопку сверки
+  const verifyBtn = panel.querySelector("#btn-verify-download");
+  if (verifyBtn) {
+    verifyBtn.disabled = tp.busy || state.verify.loading;
+    if (state.verify.loading) {
+      verifyBtn.innerText = "⏳ Сверка…";
+    } else {
+      verifyBtn.innerText = count > 0 ? `🔍 Сверить (${count})` : "🔍 Сверить папку";
+    }
   }
 
   // Обновляем сообщения
@@ -810,8 +1127,35 @@ async function refreshTasks() {
   }
 }
 
+async function loadConfig() {
+  try {
+    const cfg = await api.config();
+    const saved = localStorage.getItem("ydl_last_dest");
+    const preferred = saved || cfg?.last_dest || cfg?.download_root;
+    if (preferred) {
+      state.taskPanel.dest = preferred;
+      const destInput = document.getElementById("dest-input");
+      if (destInput) {
+        destInput.value = preferred;
+      }
+    }
+    if (cfg && cfg.concurrency) {
+      state.taskPanel.concurrency = cfg.concurrency;
+      const concInput = document.getElementById("concurrency-input");
+      if (concInput) concInput.value = cfg.concurrency;
+    }
+  } catch (e) {
+    console.warn("Config load error:", e);
+  }
+}
+
 // --- Инициализация ---
 
-initTheme();
-loadToken();
-setInterval(refreshTasks, 2000);
+async function init() {
+  initTheme();
+  await loadConfig();
+  await loadToken();
+  setInterval(refreshTasks, 2000);
+}
+
+init();

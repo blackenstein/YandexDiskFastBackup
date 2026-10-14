@@ -54,6 +54,17 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path in ("/", "/index.html", "/app.js", "/styles.css") or path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # Форматируем ошибки как {"error": "..."}, чтобы полностью совпадать с контрактом DRF
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):

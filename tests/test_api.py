@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app import config
-from app.db import db
+from app.db import Database, db
 from app.downloader import download_manager
 from app.yandex import YandexClient
 
@@ -21,6 +21,15 @@ async def test_oauth_url(async_client, monkeypatch):
     resp = await async_client.get("/api/oauth-url/")
     assert resp.status_code == 200
     assert "client_id=12345abcde" in resp.json()["url"]
+
+
+@pytest.mark.asyncio
+async def test_config_endpoint(async_client):
+    resp = await async_client.get("/api/config/")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "download_root" in data
+    assert "concurrency" in data
 
 
 @pytest.mark.asyncio
@@ -386,4 +395,92 @@ async def test_create_task_with_keep_parts(async_client, monkeypatch, tmp_path):
 
     task = db.get_task(tid)
     assert task["keep_parts"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_last_dest(async_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DOWNLOAD_ROOT", tmp_path)
+    # Для пустой базы get_last_dest возвращает None
+    empty_db = Database(str(tmp_path / "empty.db"))
+    empty_db.init_db()
+    assert empty_db.get_last_dest() is None
+
+    # Создаём задачу с уникальным dest
+    custom_dest = str(tmp_path / "custom_folder_123")
+    db.save_account(token="dummy-tok", login="test", total_bytes=1000, used_bytes=100)
+
+    async def fake_iter_files(self, items):
+        if False:
+            yield
+
+    monkeypatch.setattr(YandexClient, "iter_files", fake_iter_files)
+    post_resp = await async_client.post(
+        "/api/tasks/",
+        json={"dest": custom_dest, "items": [{"path": "/dir", "type": "folder"}]},
+    )
+    assert post_resp.status_code == 201
+
+    # Теперь config возвращает сохранённый custom_dest
+    resp = await async_client.get("/api/config/")
+    assert resp.status_code == 200
+    assert resp.json()["last_dest"] == custom_dest
+    assert db.get_last_dest() == custom_dest
+
+
+@pytest.mark.asyncio
+async def test_verify_files(async_client, monkeypatch, tmp_path):
+    # 1. Без токена -> 401
+    resp = await async_client.post("/api/verify/", json={"dest": str(tmp_path)})
+    assert resp.status_code == 401
+
+    db.save_account(token="dummy-tok", login="test", total_bytes=1000, used_bytes=100)
+    monkeypatch.setattr(config, "DOWNLOAD_ROOT", tmp_path)
+
+    # Создаем тестовую структуру файлов
+    # 1) ok.txt: размер совпадает (10 байт)
+    f_ok = tmp_path / "sub" / "ok.txt"
+    f_ok.parent.mkdir(parents=True, exist_ok=True)
+    f_ok.write_bytes(b"0123456789")
+
+    # 2) mismatch.txt: локально 5 байт, в облаке 20
+    f_mis = tmp_path / "sub" / "mismatch.txt"
+    f_mis.write_bytes(b"12345")
+
+    # 3) part.txt: локально есть part.txt.part (15 байт), в облаке 30
+    f_part = tmp_path / "sub" / "part.txt.part"
+    f_part.write_bytes(b"A" * 15)
+
+    # 4) missing.txt: локально отсутствует вовсе
+
+    async def fake_iter_files(self, items):
+        yield "/sub/ok.txt", 10
+        yield "/sub/mismatch.txt", 20
+        yield "/sub/part.txt", 30
+        yield "/sub/missing.txt", 40
+
+    monkeypatch.setattr(YandexClient, "iter_files", fake_iter_files)
+
+    resp = await async_client.post(
+        "/api/verify/",
+        json={"dest": str(tmp_path), "items": [{"path": "/sub", "type": "folder"}]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_files"] == 4
+    assert data["matched_files"] == 1
+    assert data["matched_bytes"] == 10
+    assert data["mismatched_files"] == 1
+    assert data["mismatched_bytes"] == 20
+    assert data["part_files"] == 1
+    assert data["part_bytes"] == 30
+    assert data["missing_files"] == 1
+    assert data["missing_bytes"] == 40
+    assert len(data["missing_items"]) == 3
+    assert [x["path"] for x in data["missing_items"]] == [
+        "/sub/mismatch.txt",
+        "/sub/part.txt",
+        "/sub/missing.txt",
+    ]
+    assert len(data["details"]) == 4
+
 

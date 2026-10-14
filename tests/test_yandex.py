@@ -9,6 +9,25 @@ def test_norm_path():
     assert c._norm_path("disk:/") == "/"
     assert c._norm_path("/a/b") == "/a/b"
     assert c._norm_path(None) == ""
+    assert c._norm_path("") == ""
+    # Гарантия лидирующего слэша для предотвращения DiskPathFormatError в API Яндекса
+    assert c._norm_path("disk:D") == "/D"
+    assert c._norm_path("D") == "/D"
+    assert c._norm_path("disk:/D") == "/D"
+    assert c._norm_path("/D") == "/D"
+
+
+def test_api_path():
+    assert c._api_path("/") == "disk:/"
+    assert c._api_path(None) == "disk:/"
+    assert c._api_path("") == "disk:/"
+    assert c._api_path("/a/b") == "disk:/a/b"
+    assert c._api_path("disk:/a/b") == "disk:/a/b"
+    # Защита от сбоя парсинга двоеточия в API Яндекса для папок вида 'D:'
+    assert c._api_path("/D:") == "disk:/D:"
+    assert c._api_path("disk:/D:") == "disk:/D:"
+    assert c._api_path("D:") == "disk:/D:"
+    assert c._api_path("/D:/file.txt") == "disk:/D:/file.txt"
 
 
 def test_norm_type():

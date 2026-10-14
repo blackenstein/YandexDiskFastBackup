@@ -171,12 +171,42 @@ class YandexClient:
 
     @staticmethod
     def _norm_path(p: Optional[str]) -> str:
-        """'disk:/a/b' → '/a/b'."""
-        if not p:
+        """Нормализует путь ресурса Яндекс Диска: 'disk:/a/b' → '/a/b', 'disk:D' → '/D'.
+
+        API Яндекс Диска строго требует, чтобы путь начинался со слэша '/'.
+        Если путь не начинается со слэша (например, 'D' или 'disk:D'), API возвращает:
+        HTTP 400 DiskPathFormatError: Указанный формат ресурса Диска "D" не корректен. Должен начинаться с /.
+        Эта функция гарантирует наличие ведущего слэша и корректный формат для API.
+        """
+        if p is None or p == "":
             return ""
-        if p.startswith("disk:"):
-            return p[len("disk:") :]
-        return p
+        s = str(p).strip()
+        if s.startswith("disk:"):
+            s = s[len("disk:") :]
+        s = s.replace("\\", "/")
+        if not s:
+            return "/"
+        if not s.startswith("/"):
+            s = "/" + s
+        return s
+
+    @classmethod
+    def _api_path(cls, p: Optional[str]) -> str:
+        """Формирует путь для query-параметра API Яндекса ('disk:/...').
+
+        API Яндекс Диска при наличии двоеточия в пути (например, папка 'D:')
+        разбирает строку по первому двоеточию на (area:path).
+        Если передать '/D:' без префикса 'disk:', Яндекс посчитает '/D' областью,
+        а остаток — пустой строкой, возвращая:
+        HTTP 400: Указанный формат ресурса Диска "" не корректен. Должен начинаться с /.
+        Явный префикс 'disk:' гарантирует, что область — всегда 'disk', а '/D:' — путь внутри неё.
+        """
+        s = cls._norm_path(p)
+        if not s or s == "/":
+            return "disk:/"
+        if s.startswith("disk:"):
+            return s
+        return f"disk:{s}"
 
     @staticmethod
     def _norm_type(t: str) -> str:
@@ -231,7 +261,7 @@ class YandexClient:
 
     async def list_folder(self, path: str = "/") -> AsyncIterator[Dict[str, Any]]:
         """Итератор по элементам папки с offset-пагинацией (1000 на страницу)."""
-        params = {"path": self._norm_path(path or "/"), "limit": 1000, "offset": 0}
+        params = {"path": self._api_path(path or "/"), "limit": 1000, "offset": 0}
         while True:
             resp = await self._request("GET", "/disk/resources", params=params)
             data = resp.json()
@@ -265,7 +295,7 @@ class YandexClient:
 
     async def get_resource(self, path: str) -> Dict[str, Any]:
         """Объект ресурса. Актуальный формат возвращает его без обёртки, старый — списком."""
-        resp = await self._request("GET", "/disk/resources", params={"path": self._norm_path(path)})
+        resp = await self._request("GET", "/disk/resources", params={"path": self._api_path(path)})
         data = resp.json()
         if isinstance(data, dict) and ("type" in data or "file" in data):
             return data

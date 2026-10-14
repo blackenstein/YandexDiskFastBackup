@@ -654,3 +654,76 @@ a:hover {
 .theme-toggle-btn:hover {
   background: var(--bg-soft);
 }
+
+/* --- Сверка файлов --- */
+.verify-card {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.verify-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.verify-header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.verify-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.verify-stat-item {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.verify-stat-val {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.verify-stat-lbl {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.verify-details-list {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.verify-details-list li {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.verify-details-list li:last-child {
+  border-bottom: none;
+}

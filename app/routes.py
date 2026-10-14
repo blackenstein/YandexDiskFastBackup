@@ -2,7 +2,7 @@
 
 import posixpath
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from . import config
 from .db import db
 from .downloader import download_manager
-from .paths import PathError, resolve_dest
+from .paths import PathError, resolve_dest, safe_join, yandex_rel
 from .yandex import TokenInvalidError, YandexAPIError, YandexClient
 
 router = APIRouter(prefix="/api")
@@ -34,6 +34,11 @@ class CreateTaskRequest(BaseModel):
     keep_parts: Optional[bool] = False
 
 
+class VerifyRequest(BaseModel):
+    dest: str
+    items: Optional[List[Dict[str, Any]]] = None
+
+
 # --- Эндпоинты ---
 
 @router.get("/oauth-url/")
@@ -45,6 +50,16 @@ async def get_oauth_url():
             detail="YANDEX_CLIENT_ID не задан — добавьте его в .env",
         )
     return {"url": f"https://oauth.yandex.ru/authorize?response_type=token&client_id={config.YANDEX_CLIENT_ID}"}
+
+
+@router.get("/config/")
+async def get_config():
+    """Текущая конфигурация сервера для веб-интерфейса."""
+    return {
+        "download_root": str(config.DOWNLOAD_ROOT),
+        "concurrency": config.DOWNLOAD_CONCURRENCY,
+        "last_dest": db.get_last_dest(),
+    }
 
 
 @router.get("/token/")
@@ -256,3 +271,157 @@ async def cancel_task_endpoint(task_id: str):
 
     download_manager.cancel_task(task_id)
     return {"cancelled": True}
+
+
+@router.post("/verify/")
+async def verify_files(req: VerifyRequest):
+    """Сверяет файлы в локальной папке с файлами на Яндекс Диске.
+
+    Выявляет:
+    - полностью загруженные и совпавшие файлы (ok);
+    - отсутствующие локально файлы (missing);
+    - недокачанные файлы (.part);
+    - файлы с несовпадающим размером (mismatch).
+    """
+    acc = db.get_account()
+    if not acc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Подключите Яндекс Диск",
+        )
+
+    dest = (req.dest or "").strip()
+    if not dest:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Укажите папку назначения",
+        )
+
+    try:
+        dest_path = resolve_dest(dest, config.DOWNLOAD_ROOT, enforce_root=config.ENFORCE_DOWNLOAD_ROOT)
+    except PathError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    raw_items = req.items or []
+    clean: List[Dict[str, Any]] = []
+    for it in raw_items[:1000]:
+        if isinstance(it, dict):
+            p = (it.get("path") or "").strip()
+            if p:
+                clean.append({
+                    "path": p,
+                    "type": it.get("type") if it.get("type") in ("file", "folder") else "folder",
+                })
+
+    if not clean:
+        clean = [{"path": "/", "type": "folder"}]
+
+    client = YandexClient(acc["token"])
+    cloud_files: List[Tuple[str, int]] = []
+    try:
+        async with client:
+            for it in clean:
+                async for f_path, f_sz in client.iter_files([it]):
+                    cloud_files.append((f_path, f_sz))
+    except TokenInvalidError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Токен истёк — подключите Яндекс Диск снова",
+        )
+    except YandexAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ошибка Яндекс Диска: {e.message}",
+        )
+
+    total_files = len(cloud_files)
+    total_bytes = sum(sz for _, sz in cloud_files)
+    matched_files = 0
+    matched_bytes = 0
+    missing_files = 0
+    missing_bytes = 0
+    mismatched_files = 0
+    mismatched_bytes = 0
+    part_files = 0
+    part_bytes = 0
+
+    missing_items: List[Dict[str, Any]] = []
+    details: List[Dict[str, Any]] = []
+
+    for disk_path, cloud_sz in cloud_files:
+        try:
+            rel = yandex_rel(disk_path)
+            target = safe_join(dest_path, rel)
+            part_target = target.with_name(target.name + ".part")
+        except Exception:
+            missing_files += 1
+            missing_bytes += (cloud_sz or 0)
+            missing_items.append({"path": disk_path, "type": "file"})
+            continue
+
+        status_str = "missing"
+        local_sz = None
+
+        if target.is_file():
+            try:
+                local_sz = target.stat().st_size
+                if cloud_sz is None or cloud_sz == 0 or local_sz == int(cloud_sz):
+                    status_str = "ok"
+                    matched_files += 1
+                    matched_bytes += (cloud_sz or local_sz or 0)
+                else:
+                    status_str = "mismatch"
+                    mismatched_files += 1
+                    mismatched_bytes += (cloud_sz or 0)
+                    missing_items.append({"path": disk_path, "type": "file"})
+            except Exception:
+                status_str = "missing"
+                missing_files += 1
+                missing_bytes += (cloud_sz or 0)
+                missing_items.append({"path": disk_path, "type": "file"})
+        elif part_target.is_file():
+            try:
+                part_sz = part_target.stat().st_size
+                status_str = "part"
+                part_files += 1
+                part_bytes += (cloud_sz or 0)
+                local_sz = part_sz
+                missing_items.append({"path": disk_path, "type": "file"})
+            except Exception:
+                status_str = "missing"
+                missing_files += 1
+                missing_bytes += (cloud_sz or 0)
+                missing_items.append({"path": disk_path, "type": "file"})
+        else:
+            status_str = "missing"
+            missing_files += 1
+            missing_bytes += (cloud_sz or 0)
+            missing_items.append({"path": disk_path, "type": "file"})
+
+        if len(details) < 50000:
+            details.append({
+                "path": disk_path,
+                "local_rel": rel,
+                "status": status_str,
+                "cloud_size": cloud_sz,
+                "local_size": local_sz,
+            })
+
+    return {
+        "dest": str(dest_path),
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "matched_files": matched_files,
+        "matched_bytes": matched_bytes,
+        "missing_files": missing_files,
+        "missing_bytes": missing_bytes,
+        "mismatched_files": mismatched_files,
+        "mismatched_bytes": mismatched_bytes,
+        "part_files": part_files,
+        "part_bytes": part_bytes,
+        "missing_items": missing_items,
+        "details": details,
+    }

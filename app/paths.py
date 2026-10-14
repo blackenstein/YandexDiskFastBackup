@@ -37,10 +37,19 @@ def yandex_rel(disk_path):
     """Возвращает путь файла/папки Яндекса относительно корня диска.
 
     '/a/b/c.txt' → 'a/b/c.txt'.
+    'disk:/a/b/c.txt' → 'a/b/c.txt'.
+    На Windows пути вроде 'D:/file.txt' (например, бэкап диска D в облаке)
+    трактуются Path как переключение диска на D:. Чтобы избежать смены диска
+    и ошибок файловой системы, двоеточия (недопустимые в именах файлов Windows)
+    заменяются на '_'.
     """
-    rel = (disk_path or "").replace("\\", "/").strip("/")
+    rel = (disk_path or "").strip()
+    if rel.startswith("disk:"):
+        rel = rel[len("disk:") :]
+    rel = rel.replace("\\", "/").strip("/")
     if not rel:
         raise PathError("Путь на диске пуст")
+    rel = rel.replace(":", "_")
     return rel
 
 
